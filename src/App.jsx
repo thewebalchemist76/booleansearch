@@ -17,6 +17,7 @@ function App() {
       .replace(/^www\./i, '')
       .replace(/\/$/, '')
       .split('/')[0] // Take only the domain part
+    
     return cleaned
   }
 
@@ -68,10 +69,11 @@ function App() {
 
             const data = await response.json()
             
+            // FIX: Rimuovi il .* dalla query
             searchResults.push({
               domain,
               article,
-              searchQuery: `site:${domain}.* "${article}"`,
+              searchQuery: `site:${domain} "${article}"`, // CORRETTO: tolto .*
               url: data.url || '',
               title: data.title || '',
               error: data.error || null,
@@ -84,18 +86,19 @@ function App() {
             searchResults.push({
               domain,
               article,
-              searchQuery: `site:${domain}.* "${article}"`,
+              searchQuery: `site:${domain} "${article}"`, // CORRETTO: tolto .*
               url: '',
               title: '',
               error: err.message,
               captcha: false,
             })
+
             completed++
             setProgress(Math.round((completed / totalSearches) * 100))
           }
 
           // Small delay to avoid rate limiting
-          await new Promise(resolve => setTimeout(resolve, 500))
+          await new Promise(resolve => setTimeout(resolve, 1000)) // Aumentato a 1 secondo
         }
       }
 
@@ -156,7 +159,7 @@ function App() {
               id="domains"
               value={domains}
               onChange={(e) => setDomains(e.target.value)}
-              placeholder="youtube.com/&#10;dailymotion.com/video/&#10;quotidiano.net/video/&#10;..."
+              placeholder="youtube.com&#10;dailymotion.com&#10;quotidiano.net&#10;..."
               rows={8}
               disabled={isSearching}
             />
@@ -210,6 +213,7 @@ function App() {
                 📥 Scarica CSV
               </button>
             </div>
+
             <div className="results-table-container">
               <table className="results-table">
                 <thead>
