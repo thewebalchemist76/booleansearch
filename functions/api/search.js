@@ -12,20 +12,22 @@ export async function onRequestPost(context) {
         headers: { 'Content-Type': 'application/json' }
       });
     }
-
-    const searchQuery = `site:${domain}.* "${query}"`;
     
-    // Try Google first
-    let result = await searchGoogle(searchQuery);
+    // FIX: Rimuovi il .* e altri caratteri problematici dal dominio
+    const cleanDomain = domain.replace(/\.\*$/, '').replace(/\*$/, '').trim();
+    const searchQuery = `site:${cleanDomain} "${query}"`;
     
-    // If Google fails or has captcha, try Bing
-    if (result.error || result.captcha) {
-      const bingResult = await searchBing(searchQuery);
-      if (bingResult.url && !bingResult.error) {
-        result = bingResult;
+    // Try Bing first (less likely to get captcha)
+    let result = await searchBing(searchQuery);
+    
+    // If Bing fails, try Google
+    if (result.error || !result.url) {
+      const googleResult = await searchGoogle(searchQuery);
+      if (googleResult.url && !googleResult.error && !googleResult.captcha) {
+        result = googleResult;
       }
     }
-
+    
     return new Response(JSON.stringify(result), {
       headers: { 'Content-Type': 'application/json' }
     });
@@ -51,7 +53,7 @@ async function searchGoogle(query) {
         'Referer': 'https://www.google.com/',
       },
     });
-
+    
     if (!response.ok) {
       return {
         url: '',
@@ -60,7 +62,7 @@ async function searchGoogle(query) {
         error: `Errore HTTP ${response.status}`
       };
     }
-
+    
     const html = await response.text();
     
     // Check for captcha - multiple patterns
@@ -85,7 +87,7 @@ async function searchGoogle(query) {
         title: ''
       };
     }
-
+    
     // Multiple parsing strategies for Google results
     // Strategy 1: Standard result link pattern
     const urlMatch1 = html.match(/<a[^>]+href="\/url\?q=([^"&]+)[^"]*"[^>]*>[\s\S]*?<h3[^>]*>([^<]+)<\/h3>/i);
@@ -102,7 +104,7 @@ async function searchGoogle(query) {
         };
       }
     }
-
+    
     // Strategy 2: Extract all result links
     const linkRegex = /<a[^>]+href="\/url\?q=([^"&]+)[^"]*"/gi;
     const links = [];
@@ -139,7 +141,7 @@ async function searchGoogle(query) {
         error: null
       };
     }
-
+    
     // Strategy 3: Try to find any external link in results
     const externalLinkRegex = /href="(https?:\/\/[^"]+)"[^>]*class="[^"]*yuRUbf[^"]*"/i;
     const externalMatch = html.match(externalLinkRegex);
@@ -152,7 +154,7 @@ async function searchGoogle(query) {
         error: null
       };
     }
-
+    
     return {
       url: '',
       title: '',
@@ -181,7 +183,7 @@ async function searchBing(query) {
         'Referer': 'https://www.bing.com/',
       },
     });
-
+    
     if (!response.ok) {
       return {
         url: '',
@@ -190,7 +192,7 @@ async function searchBing(query) {
         error: `Errore HTTP ${response.status}`
       };
     }
-
+    
     const html = await response.text();
     
     // Parse Bing results - multiple strategies
@@ -211,7 +213,7 @@ async function searchBing(query) {
         };
       }
     }
-
+    
     // Strategy 2: Find all result links with b_title class
     const linkRegex = /<a[^>]+href="(https?:\/\/[^"]+)"[^>]*class="[^"]*b_title[^"]*"/gi;
     const links = [];
@@ -247,7 +249,7 @@ async function searchBing(query) {
         error: null
       };
     }
-
+    
     // Strategy 3: Try alternative Bing result structure
     const altLinkRegex = /<a[^>]+href="(https?:\/\/[^"]+)"[^>]*data-ptn="web"[^>]*>/gi;
     const altLinks = [];
@@ -267,7 +269,7 @@ async function searchBing(query) {
         error: null
       };
     }
-
+    
     return {
       url: '',
       title: '',
@@ -283,4 +285,3 @@ async function searchBing(query) {
     };
   }
 }
-
