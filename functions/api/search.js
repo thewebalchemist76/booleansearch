@@ -13,15 +13,12 @@ export async function onRequestPost(context) {
       });
     }
     
-    // FIX: Pulisci il dominio
-    domain = domain.replace(/\.\*$/, '')
-                   .replace(/\*$/, '')
-                   .replace(/\.$/, '')
-                   .trim();
+    // Pulisci il dominio
+    domain = domain.replace(/\.\*$/, '').replace(/\*$/, '').replace(/\.$/, '').trim();
     
     const searchQuery = `site:${domain} "${query}"`;
     
-    // Use Google with rotating proxies
+    // Use Google with ScraperAPI
     const result = await searchGoogle(searchQuery, query, env);
     
     return new Response(JSON.stringify(result), {
@@ -37,21 +34,6 @@ export async function onRequestPost(context) {
   }
 }
 
-// Helper to get random User-Agent
-function getRandomUserAgent() {
-  const userAgents = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-  ];
-  
-  return userAgents[Math.floor(Math.random() * userAgents.length)];
-}
-
-// Helper function to calculate string similarity
 function calculateSimilarity(str1, str2) {
   const s1 = str1.toLowerCase().trim();
   const s2 = str2.toLowerCase().trim();
@@ -77,52 +59,30 @@ function calculateSimilarity(str1, str2) {
 async function searchGoogle(query, originalQuery, env) {
   try {
     const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}&num=10&hl=it`;
-    const userAgent = getRandomUserAgent();
     
-    // Prepare fetch options
-    const fetchOptions = {
-      headers: {
-        'User-Agent': userAgent,
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-        'Accept-Language': 'it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'DNT': '1',
-        'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'none',
-        'Sec-Fetch-User': '?1',
-        'Cache-Control': 'max-age=0',
-        'Referer': 'https://www.google.com/',
-      },
-    };
+    let response;
     
-    // Add proxy if credentials are available
-    if (env.PROXY_HOST && env.PROXY_USERNAME && env.PROXY_PASSWORD) {
-      // Note: Cloudflare Workers don't support HTTP proxies directly via fetch
-      // We need to use a different approach
-      
-      // Create proxy URL with authentication
-      const proxyUrl = `http://${env.PROXY_USERNAME}:${env.PROXY_PASSWORD}@${env.PROXY_HOST}:${env.PROXY_PORT || '80'}`;
-      
-      // For Cloudflare Workers, we need to use a workaround
-      // Option 1: Use a proxy service that works with Workers
-      // Option 2: Make the request through a proxy endpoint
-      
-      // Since Cloudflare Workers don't natively support HTTP proxies,
-      // we'll try a direct request with rotating User-Agents first
-      // If you need true proxy support, consider using a different platform or proxy API
+    // Use ScraperAPI if available
+    if (env.SCRAPER_API_KEY) {
+      const scraperUrl = `http://api.scraperapi.com?api_key=${env.SCRAPER_API_KEY}&url=${encodeURIComponent(searchUrl)}&render=false`;
+      response = await fetch(scraperUrl);
+    } else {
+      // Fallback to direct request (will likely get rate limited)
+      response = await fetch(searchUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+          'Accept-Language': 'it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7',
+        },
+      });
     }
-    
-    const response = await fetch(searchUrl, fetchOptions);
     
     if (!response.ok) {
       return {
         url: '',
         title: '',
         captcha: response.status === 429,
-        error: `Errore HTTP ${response.status}`
+        error: `Errore HTTP ${response.status}. ${env.SCRAPER_API_KEY ? '' : 'Configura SCRAPER_API_KEY per evitare rate limiting.'}`
       };
     }
     
@@ -151,34 +111,29 @@ async function searchGoogle(query, originalQuery, env) {
       };
     }
     
-    // Extract results with titles
+    // Extract results
     const results = [];
     
-    // Strategy 1: Standard pattern
+    // Strategy 1
     const urlMatch1 = html.match(/<a[^>]+href="\/url\?q=([^"&]+)[^"]*"[^>]*>[\s\S]*?<h3[^>]*>([^<]+)<\/h3>/i);
     if (urlMatch1 && urlMatch1[1]) {
       const url = decodeURIComponent(urlMatch1[1]);
       const title = urlMatch1[2] ? urlMatch1[2].replace(/<[^>]+>/g, '').trim() : '';
       
-      if (url && !url.startsWith('http://www.google.com') && !url.startsWith('https://www.google.com')) {
+      if (url && !url.includes('google.com')) {
         const similarity = calculateSimilarity(title, originalQuery);
         results.push({ url, title, similarity, captcha: false, error: null });
       }
     }
     
-    // Strategy 2: Extract all links
+    // Strategy 2
     const linkRegex = /<a[^>]+href="\/url\?q=([^"&]+)[^"]*"/gi;
     let match;
     
     while ((match = linkRegex.exec(html)) !== null && results.length < 10) {
       const url = decodeURIComponent(match[1]);
       
-      if (url && !url.startsWith('http://www.google.com') && 
-          !url.startsWith('https://www.google.com') &&
-          !url.startsWith('http://webcache.googleusercontent.com') &&
-          !url.includes('google.com/search')) {
-        
-        // Try to find title
+      if (url && !url.includes('google.com') && !url.includes('webcache.googleusercontent.com')) {
         const contextStart = Math.max(0, match.index - 200);
         const contextEnd = Math.min(html.length, match.index + 500);
         const context = html.substring(contextStart, contextEnd);
@@ -194,7 +149,6 @@ async function searchGoogle(query, originalQuery, env) {
     }
     
     if (results.length > 0) {
-      // Sort by similarity and return best match
       results.sort((a, b) => b.similarity - a.similarity);
       return results[0];
     }
