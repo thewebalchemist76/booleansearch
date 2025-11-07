@@ -16,7 +16,7 @@ export async function onRequestPost(context) {
     domain = domain.replace(/\.\*$/, '').replace(/\*$/, '').replace(/\.$/, '').trim();
     const searchQuery = `site:${domain} "${query}"`;
     
-    // Use only Qwant
+    // Use Qwant API
     const result = await searchQwant(searchQuery, query);
     
     return new Response(JSON.stringify(result), {
@@ -56,13 +56,13 @@ function calculateSimilarity(str1, str2) {
 
 async function searchQwant(query, originalQuery) {
   try {
-    // Qwant search URL
-    const searchUrl = `https://www.qwant.com/?q=${encodeURIComponent(query)}&t=web`;
+    // Qwant internal API endpoint (used by their frontend)
+    const apiUrl = `https://api.qwant.com/v3/search/web?q=${encodeURIComponent(query)}&locale=it_IT&count=10&offset=0`;
     
-    const response = await fetch(searchUrl, {
+    const response = await fetch(apiUrl, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept': 'application/json',
         'Accept-Language': 'it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7',
         'Referer': 'https://www.qwant.com/',
       }
@@ -72,77 +72,61 @@ async function searchQwant(query, originalQuery) {
       return {
         url: '',
         title: '',
-        error: `Errore Qwant HTTP ${response.status}`
+        error: `Errore Qwant API HTTP ${response.status}`
       };
     }
     
-    const html = await response.text();
+    const data = await response.json();
     
-    // Parse Qwant results based on the HTML structure you provided
+    // Check for API errors
+    if (data.status !== 'success') {
+      return {
+        url: '',
+        title: '',
+        error: 'Errore nella risposta Qwant API'
+      };
+    }
+    
+    // Parse Qwant API response
+    if (!data.data || !data.data.result || !data.data.result.items || data.data.result.items.length === 0) {
+      return {
+        url: '',
+        title: '',
+        error: 'Nessun risultato trovato su Qwant'
+      };
+    }
+    
     const results = [];
     
-    // Pattern 1: Main title link with class pattern
-    // Looking for: <a href="URL" class="external"><div class="..."><span>TITLE</span></div></a>
-    const titlePattern = /<a\s+href="(https?:\/\/[^"]+)"\s+class="external"[^>]*>\s*<div[^>]*class="[^"]*HhS7p[^"]*"[^>]*>\s*<span>([^<]+)<\/span>/gi;
-    let match;
-    
-    while ((match = titlePattern.exec(html)) !== null) {
-      const url = match[1];
-      const title = match[2].trim();
-      
-      // Skip Qwant internal links
-      if (!url.includes('qwant.com')) {
-        const similarity = calculateSimilarity(title, originalQuery);
-        results.push({ url, title, similarity });
-      }
-    }
-    
-    // Pattern 2: Alternative - look for data-testid="webResult" containers
-    const webResultPattern = /<div[^>]+data-testid="webResult"[^>]*>([\s\S]*?)<\/div>\s*<\/div>\s*<\/div>\s*<\/div>/gi;
-    
-    while ((match = webResultPattern.exec(html)) !== null && results.length < 10) {
-      const resultBlock = match[1];
-      
-      // Extract URL from the block
-      const urlMatch = resultBlock.match(/href="(https?:\/\/[^"]+)"\s+class="external"/);
-      if (urlMatch) {
-        const url = urlMatch[1];
+    // Extract web results
+    for (const item of data.data.result.items) {
+      // Qwant returns different types of items, we want 'mainline' items
+      if (item.type === 'web' || item.items) {
+        const webItems = item.items || [item];
         
-        // Extract title
-        const titleMatch = resultBlock.match(/<span>([^<]+)<\/span>\s*<\/div>\s*<\/a>\s*<div[^>]*class="[^"]*ikbiq/);
-        const title = titleMatch ? titleMatch[1].trim() : '';
-        
-        if (url && !url.includes('qwant.com') && !results.some(r => r.url === url)) {
-          const similarity = title ? calculateSimilarity(title, originalQuery) : 0;
-          results.push({ url, title: title || url, similarity });
+        for (const webItem of webItems) {
+          if (webItem.url && webItem.title) {
+            const url = webItem.url;
+            const title = webItem.title;
+            const desc = webItem.desc || '';
+            
+            // Calculate similarity
+            const titleSimilarity = calculateSimilarity(title, originalQuery);
+            const descSimilarity = calculateSimilarity(desc, originalQuery);
+            const similarity = Math.max(titleSimilarity, descSimilarity * 0.8);
+            
+            results.push({ 
+              url, 
+              title: title.replace(/<[^>]+>/g, ''), // Remove any HTML tags
+              similarity 
+            });
+          }
         }
       }
     }
     
-    // Pattern 3: Simpler extraction - just get all external links
-    if (results.length === 0) {
-      const linkPattern = /<a\s+href="(https?:\/\/(?!www\.qwant\.com)[^"]+)"\s+class="external"/gi;
-      
-      while ((match = linkPattern.exec(html)) !== null && results.length < 10) {
-        const url = match[1];
-        
-        // Try to find title near this link
-        const contextStart = Math.max(0, match.index - 500);
-        const contextEnd = Math.min(html.length, match.index + 1000);
-        const context = html.substring(contextStart, contextEnd);
-        
-        const titleMatch = context.match(/<span>([^<]+)<\/span>\s*<\/div>\s*<\/a>/);
-        const title = titleMatch ? titleMatch[1].trim() : '';
-        
-        if (!results.some(r => r.url === url)) {
-          const similarity = title ? calculateSimilarity(title, originalQuery) : 0;
-          results.push({ url, title: title || url, similarity });
-        }
-      }
-    }
-    
-    // Sort by similarity and return best match
     if (results.length > 0) {
+      // Sort by similarity and return best match
       results.sort((a, b) => b.similarity - a.similarity);
       const best = results[0];
       
@@ -156,7 +140,7 @@ async function searchQwant(query, originalQuery) {
     return {
       url: '',
       title: '',
-      error: 'Nessun risultato trovato su Qwant'
+      error: 'Nessun risultato trovato'
     };
   } catch (error) {
     return {
@@ -166,23 +150,3 @@ async function searchQwant(query, originalQuery) {
     };
   }
 }
-
-/* COMMENTED OUT - Other search engines
-
-async function searchDuckDuckGo(query, originalQuery) {
-  // ... DuckDuckGo code commented
-}
-
-async function searchBrave(query, originalQuery, env) {
-  // ... Brave code commented
-}
-
-async function searchSerpAPI(query, originalQuery, env) {
-  // ... SerpAPI code commented
-}
-
-async function searchScraperAPI(query, originalQuery, env) {
-  // ... ScraperAPI code commented
-}
-
-*/
