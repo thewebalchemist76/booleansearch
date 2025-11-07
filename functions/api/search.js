@@ -21,13 +21,10 @@ export async function onRequestPost(context) {
     
     const searchQuery = `site:${domain} "${query}"`;
     
-    // Try multiple search engines in sequence
+    // Try DuckDuckGo first
     let result = await searchDuckDuckGo(searchQuery, query);
     
-    if (!result.url || result.error) {
-      result = await searchBrave(searchQuery, query);
-    }
-    
+    // If DuckDuckGo fails, try Google
     if (!result.url || result.error) {
       const googleResult = await searchGoogle(searchQuery, query);
       if (googleResult.url && !googleResult.error && !googleResult.captcha) {
@@ -77,14 +74,19 @@ function calculateSimilarity(str1, str2) {
 
 async function searchDuckDuckGo(query, originalQuery) {
   try {
-    const searchUrl = `https://duckduckgo.com/?q=${encodeURIComponent(query)}&t=h_&ia=web`;
+    // Use the HTML-only endpoint for easier parsing
+    const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
     
     const response = await fetch(searchUrl, {
+      method: 'POST',
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
         'Accept-Language': 'it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Referer': 'https://duckduckgo.com/',
       },
+      body: `q=${encodeURIComponent(query)}&b=&kl=wt-wt`
     });
     
     if (!response.ok) {
@@ -97,16 +99,25 @@ async function searchDuckDuckGo(query, originalQuery) {
     
     const html = await response.text();
     
-    // Extract all potential results with titles
+    // DuckDuckGo HTML version has simpler structure
     const results = [];
     
-    // Pattern 1: data-testid="result-title-a" with title
-    const titlePattern = /<a[^>]+href="(https?:\/\/[^"]+)"[^>]*data-testid="result-title-a"[^>]*>[\s\S]*?<span[^>]*>([^<]+)<\/span>/gi;
+    // Pattern for HTML version: <a class="result__a" href="URL">TITLE</a>
+    const resultPattern = /<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>([^<]+)<\/a>/gi;
     let match;
     
-    while ((match = titlePattern.exec(html)) !== null) {
-      const url = match[1];
+    while ((match = resultPattern.exec(html)) !== null) {
+      let url = match[1];
       const title = match[2].replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim();
+      
+      // DuckDuckGo HTML wraps URLs, need to decode
+      if (url.startsWith('//duckduckgo.com/l/?')) {
+        // Extract the actual URL from redirect
+        const urlMatch = url.match(/uddg=([^&]+)/);
+        if (urlMatch) {
+          url = decodeURIComponent(urlMatch[1]);
+        }
+      }
       
       if (url.startsWith('http') && !url.includes('duckduckgo.com')) {
         const similarity = calculateSimilarity(title, originalQuery);
@@ -114,19 +125,27 @@ async function searchDuckDuckGo(query, originalQuery) {
       }
     }
     
-    // Pattern 2: result-extras-url-link
-    const urlPattern = /<a[^>]+href="(https?:\/\/[^"]+)"[^>]*data-testid="result-extras-url-link"/gi;
+    // Alternative pattern: <a rel="nofollow" class="result__url" href="URL">
+    const urlPattern = /<a[^>]+rel="nofollow"[^>]*class="[^"]*result__url[^"]*"[^>]+href="([^"]+)"/gi;
     
     while ((match = urlPattern.exec(html)) !== null) {
-      const url = match[1];
+      let url = match[1];
+      
+      // Decode DuckDuckGo redirect
+      if (url.startsWith('//duckduckgo.com/l/?')) {
+        const urlMatch = url.match(/uddg=([^&]+)/);
+        if (urlMatch) {
+          url = decodeURIComponent(urlMatch[1]);
+        }
+      }
       
       if (url.startsWith('http') && !url.includes('duckduckgo.com')) {
-        // Try to find associated title
-        const contextStart = Math.max(0, match.index - 1000);
-        const contextEnd = Math.min(html.length, match.index + 500);
+        // Try to find the title for this URL
+        const contextStart = Math.max(0, match.index - 500);
+        const contextEnd = Math.min(html.length, match.index + 200);
         const context = html.substring(contextStart, contextEnd);
         
-        const titleMatch = context.match(/<span[^>]*class="[^"]*LQVY1Jpkk8nyJ6HBWKAk[^"]*"[^>]*>([^<]+)<\/span>/i);
+        const titleMatch = context.match(/<a[^>]+class="[^"]*result__a[^"]*"[^>]*>([^<]+)<\/a>/i);
         const title = titleMatch ? titleMatch[1].replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim() : '';
         
         const similarity = title ? calculateSimilarity(title, originalQuery) : 0;
@@ -150,29 +169,6 @@ async function searchDuckDuckGo(query, originalQuery) {
       };
     }
     
-    // Fallback: generic link search
-    const linkRegex = /<a[^>]+href="(https?:\/\/(?!duckduckgo\.com)[^"]+)"/gi;
-    const links = [];
-    
-    while ((match = linkRegex.exec(html)) !== null && links.length < 10) {
-      const url = match[1];
-      if (!url.includes('duckduckgo.com') && 
-          !url.includes('mailto:') &&
-          !url.includes('javascript:') &&
-          !url.includes('.ico') &&
-          !url.includes('/favicon')) {
-        links.push(url);
-      }
-    }
-    
-    if (links.length > 0) {
-      return {
-        url: links[0],
-        title: links[0],
-        error: null
-      };
-    }
-    
     return {
       url: '',
       title: '',
@@ -183,75 +179,6 @@ async function searchDuckDuckGo(query, originalQuery) {
       url: '',
       title: '',
       error: `Errore DuckDuckGo: ${error.message}`
-    };
-  }
-}
-
-async function searchBrave(query, originalQuery) {
-  try {
-    const searchUrl = `https://search.brave.com/search?q=${encodeURIComponent(query)}&source=web`;
-    
-    const response = await fetch(searchUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7',
-      },
-    });
-    
-    if (!response.ok) {
-      return {
-        url: '',
-        title: '',
-        error: `Errore HTTP ${response.status}`
-      };
-    }
-    
-    const html = await response.text();
-    
-    // Extract results with titles
-    const results = [];
-    
-    // Brave result patterns
-    const patterns = [
-      /<a[^>]+href="(https?:\/\/[^"]+)"[^>]*class="[^"]*result-header[^"]*"[^>]*>([^<]+)<\/a>/gi,
-      /<div[^>]*class="[^"]*snippet-title[^"]*"[^>]*>[\s\S]*?<a[^>]+href="(https?:\/\/[^"]+)"[^>]*>([^<]+)<\/a>/gi,
-    ];
-    
-    for (const pattern of patterns) {
-      let match;
-      while ((match = pattern.exec(html)) !== null) {
-        const url = match[1];
-        const title = match[2] ? match[2].replace(/<[^>]+>/g, '').trim() : '';
-        
-        if (url.startsWith('http') && !url.includes('brave.com/search')) {
-          const similarity = calculateSimilarity(title, originalQuery);
-          results.push({ url, title: title || url, similarity });
-        }
-      }
-    }
-    
-    if (results.length > 0) {
-      results.sort((a, b) => b.similarity - a.similarity);
-      const best = results[0];
-      
-      return {
-        url: best.url,
-        title: best.title,
-        error: null
-      };
-    }
-    
-    return {
-      url: '',
-      title: '',
-      error: 'Nessun risultato trovato su Brave'
-    };
-  } catch (error) {
-    return {
-      url: '',
-      title: '',
-      error: `Errore Brave: ${error.message}`
     };
   }
 }
