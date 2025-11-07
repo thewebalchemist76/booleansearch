@@ -16,15 +16,21 @@ export async function onRequestPost(context) {
     domain = domain.replace(/\.\*$/, '').replace(/\*$/, '').replace(/\.$/, '').trim();
     const searchQuery = `site:${domain} "${query}"`;
     
-    // Try SerpAPI (Google results via API)
-    let result = await searchSerpAPI(searchQuery, query, env);
+    // Try ScraperAPI first (1000 credits/month)
+    let result = await searchScraperAPI(searchQuery, query, env);
+    let usedScraperAPI = false;
     
-    // Fallback to Brave if SerpAPI fails or quota exceeded
-    if (!result.url || result.error) {
+    if (result.url && !result.error) {
+      usedScraperAPI = true;
+    } else {
+      // Fallback to Brave (2000 credits/month)
       result = await searchBrave(searchQuery, query, env);
     }
     
-    return new Response(JSON.stringify(result), {
+    return new Response(JSON.stringify({
+      ...result,
+      usedScraperAPI
+    }), {
       headers: { 'Content-Type': 'application/json' }
     });
   } catch (error) {
@@ -59,22 +65,25 @@ function calculateSimilarity(str1, str2) {
   return matches / Math.max(words1.length, words2.length);
 }
 
-async function searchSerpAPI(query, originalQuery, env) {
+async function searchScraperAPI(query, originalQuery, env) {
   try {
-    if (!env.SERPAPI_KEY) {
+    if (!env.SCRAPER_API_KEY) {
       return {
         url: '',
         title: '',
-        error: 'SERPAPI_KEY non configurata'
+        error: 'SCRAPER_API_KEY non configurata'
       };
     }
     
-    // SerpAPI endpoint for Google search
-    const apiUrl = `https://serpapi.com/search.json?engine=google&q=${encodeURIComponent(query)}&api_key=${env.SERPAPI_KEY}&gl=it&hl=it&num=10`;
+    // Google search URL
+    const googleUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}&num=10&hl=it&gl=it`;
     
-    const response = await fetch(apiUrl, {
+    // ScraperAPI endpoint with better parameters
+    const scraperUrl = `http://api.scraperapi.com/?api_key=${env.SCRAPER_API_KEY}&url=${encodeURIComponent(googleUrl)}&country_code=it&render=false&premium=false`;
+    
+    const response = await fetch(scraperUrl, {
       headers: {
-        'Accept': 'application/json'
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
       }
     });
     
@@ -82,58 +91,52 @@ async function searchSerpAPI(query, originalQuery, env) {
       return {
         url: '',
         title: '',
-        error: `Errore SerpAPI HTTP ${response.status}`
+        error: `Errore ScraperAPI HTTP ${response.status}`
       };
     }
     
-    const data = await response.json();
+    const html = await response.text();
     
-    // Check for API errors
-    if (data.error) {
+    // Check for captcha or errors in the response
+    if (/captcha|CAPTCHA|unusual traffic/i.test(html)) {
       return {
         url: '',
         title: '',
-        error: data.error
+        error: 'Captcha rilevato tramite ScraperAPI'
       };
     }
     
-    // Parse organic results
-    if (!data.organic_results || data.organic_results.length === 0) {
-      return {
-        url: '',
-        title: '',
-        error: 'Nessun risultato trovato su SerpAPI'
-      };
-    }
-    
+    // Parse Google results from HTML
     const results = [];
     
-    for (const result of data.organic_results) {
-      const url = result.link || '';
-      const title = result.title || '';
-      const snippet = result.snippet || '';
+    // Extract links from Google search results
+    const linkRegex = /<a[^>]+href="\/url\?q=([^"&]+)[^"]*"/gi;
+    let match;
+    
+    while ((match = linkRegex.exec(html)) !== null && results.length < 10) {
+      const url = decodeURIComponent(match[1]);
       
-      if (url) {
-        const titleSimilarity = calculateSimilarity(title, originalQuery);
-        const snippetSimilarity = calculateSimilarity(snippet, originalQuery);
-        const similarity = Math.max(titleSimilarity, snippetSimilarity * 0.8);
+      if (url && !url.includes('google.com') && !url.includes('webcache.googleusercontent.com')) {
+        // Try to find title near the link
+        const contextStart = Math.max(0, match.index - 200);
+        const contextEnd = Math.min(html.length, match.index + 500);
+        const context = html.substring(contextStart, contextEnd);
+        const titleMatch = context.match(/<h3[^>]*>([^<]+)<\/h3>/i);
+        const title = titleMatch ? titleMatch[1].replace(/<[^>]+>/g, '').trim() : '';
         
-        results.push({
-          url,
-          title,
-          snippet,
-          similarity
-        });
+        const similarity = title ? calculateSimilarity(title, originalQuery) : 0;
+        
+        if (!results.some(r => r.url === url)) {
+          results.push({ url, title: title || url, similarity });
+        }
       }
     }
     
     if (results.length > 0) {
       results.sort((a, b) => b.similarity - a.similarity);
-      const best = results[0];
-      
       return {
-        url: best.url,
-        title: best.title,
+        url: results[0].url,
+        title: results[0].title,
         error: null
       };
     }
@@ -141,13 +144,13 @@ async function searchSerpAPI(query, originalQuery, env) {
     return {
       url: '',
       title: '',
-      error: 'Nessun risultato trovato'
+      error: 'Nessun risultato trovato tramite ScraperAPI'
     };
   } catch (error) {
     return {
       url: '',
       title: '',
-      error: `Errore SerpAPI: ${error.message}`
+      error: `Errore ScraperAPI: ${error.message}`
     };
   }
 }
