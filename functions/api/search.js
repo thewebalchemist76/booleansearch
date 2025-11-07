@@ -1,5 +1,5 @@
 export async function onRequestPost(context) {
-  const { request, env } = context;
+  const { request } = context;
   
   try {
     let { domain, query } = await request.json();
@@ -16,13 +16,8 @@ export async function onRequestPost(context) {
     domain = domain.replace(/\.\*$/, '').replace(/\*$/, '').replace(/\.$/, '').trim();
     const searchQuery = `site:${domain} "${query}"`;
     
-    // Try SerpAPI (Google results via API)
-    let result = await searchSerpAPI(searchQuery, query, env);
-    
-    // Fallback to Brave if SerpAPI fails or quota exceeded
-    if (!result.url || result.error) {
-      result = await searchBrave(searchQuery, query, env);
-    }
+    // Use only Qwant
+    const result = await searchQwant(searchQuery, query);
     
     return new Response(JSON.stringify(result), {
       headers: { 'Content-Type': 'application/json' }
@@ -59,22 +54,17 @@ function calculateSimilarity(str1, str2) {
   return matches / Math.max(words1.length, words2.length);
 }
 
-async function searchSerpAPI(query, originalQuery, env) {
+async function searchQwant(query, originalQuery) {
   try {
-    if (!env.SERPAPI_KEY) {
-      return {
-        url: '',
-        title: '',
-        error: 'SERPAPI_KEY non configurata'
-      };
-    }
+    // Qwant search URL
+    const searchUrl = `https://www.qwant.com/?q=${encodeURIComponent(query)}&t=web`;
     
-    // SerpAPI endpoint for Google search
-    const apiUrl = `https://serpapi.com/search.json?engine=google&q=${encodeURIComponent(query)}&api_key=${env.SERPAPI_KEY}&gl=it&hl=it&num=10`;
-    
-    const response = await fetch(apiUrl, {
+    const response = await fetch(searchUrl, {
       headers: {
-        'Accept': 'application/json'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Referer': 'https://www.qwant.com/',
       }
     });
     
@@ -82,51 +72,76 @@ async function searchSerpAPI(query, originalQuery, env) {
       return {
         url: '',
         title: '',
-        error: `Errore SerpAPI HTTP ${response.status}`
+        error: `Errore Qwant HTTP ${response.status}`
       };
     }
     
-    const data = await response.json();
+    const html = await response.text();
     
-    // Check for API errors
-    if (data.error) {
-      return {
-        url: '',
-        title: '',
-        error: data.error
-      };
-    }
-    
-    // Parse organic results
-    if (!data.organic_results || data.organic_results.length === 0) {
-      return {
-        url: '',
-        title: '',
-        error: 'Nessun risultato trovato su SerpAPI'
-      };
-    }
-    
+    // Parse Qwant results based on the HTML structure you provided
     const results = [];
     
-    for (const result of data.organic_results) {
-      const url = result.link || '';
-      const title = result.title || '';
-      const snippet = result.snippet || '';
+    // Pattern 1: Main title link with class pattern
+    // Looking for: <a href="URL" class="external"><div class="..."><span>TITLE</span></div></a>
+    const titlePattern = /<a\s+href="(https?:\/\/[^"]+)"\s+class="external"[^>]*>\s*<div[^>]*class="[^"]*HhS7p[^"]*"[^>]*>\s*<span>([^<]+)<\/span>/gi;
+    let match;
+    
+    while ((match = titlePattern.exec(html)) !== null) {
+      const url = match[1];
+      const title = match[2].trim();
       
-      if (url) {
-        const titleSimilarity = calculateSimilarity(title, originalQuery);
-        const snippetSimilarity = calculateSimilarity(snippet, originalQuery);
-        const similarity = Math.max(titleSimilarity, snippetSimilarity * 0.8);
-        
-        results.push({
-          url,
-          title,
-          snippet,
-          similarity
-        });
+      // Skip Qwant internal links
+      if (!url.includes('qwant.com')) {
+        const similarity = calculateSimilarity(title, originalQuery);
+        results.push({ url, title, similarity });
       }
     }
     
+    // Pattern 2: Alternative - look for data-testid="webResult" containers
+    const webResultPattern = /<div[^>]+data-testid="webResult"[^>]*>([\s\S]*?)<\/div>\s*<\/div>\s*<\/div>\s*<\/div>/gi;
+    
+    while ((match = webResultPattern.exec(html)) !== null && results.length < 10) {
+      const resultBlock = match[1];
+      
+      // Extract URL from the block
+      const urlMatch = resultBlock.match(/href="(https?:\/\/[^"]+)"\s+class="external"/);
+      if (urlMatch) {
+        const url = urlMatch[1];
+        
+        // Extract title
+        const titleMatch = resultBlock.match(/<span>([^<]+)<\/span>\s*<\/div>\s*<\/a>\s*<div[^>]*class="[^"]*ikbiq/);
+        const title = titleMatch ? titleMatch[1].trim() : '';
+        
+        if (url && !url.includes('qwant.com') && !results.some(r => r.url === url)) {
+          const similarity = title ? calculateSimilarity(title, originalQuery) : 0;
+          results.push({ url, title: title || url, similarity });
+        }
+      }
+    }
+    
+    // Pattern 3: Simpler extraction - just get all external links
+    if (results.length === 0) {
+      const linkPattern = /<a\s+href="(https?:\/\/(?!www\.qwant\.com)[^"]+)"\s+class="external"/gi;
+      
+      while ((match = linkPattern.exec(html)) !== null && results.length < 10) {
+        const url = match[1];
+        
+        // Try to find title near this link
+        const contextStart = Math.max(0, match.index - 500);
+        const contextEnd = Math.min(html.length, match.index + 1000);
+        const context = html.substring(contextStart, contextEnd);
+        
+        const titleMatch = context.match(/<span>([^<]+)<\/span>\s*<\/div>\s*<\/a>/);
+        const title = titleMatch ? titleMatch[1].trim() : '';
+        
+        if (!results.some(r => r.url === url)) {
+          const similarity = title ? calculateSimilarity(title, originalQuery) : 0;
+          results.push({ url, title: title || url, similarity });
+        }
+      }
+    }
+    
+    // Sort by similarity and return best match
     if (results.length > 0) {
       results.sort((a, b) => b.similarity - a.similarity);
       const best = results[0];
@@ -141,64 +156,33 @@ async function searchSerpAPI(query, originalQuery, env) {
     return {
       url: '',
       title: '',
-      error: 'Nessun risultato trovato'
+      error: 'Nessun risultato trovato su Qwant'
     };
   } catch (error) {
     return {
       url: '',
       title: '',
-      error: `Errore SerpAPI: ${error.message}`
+      error: `Errore Qwant: ${error.message}`
     };
   }
 }
 
-async function searchBrave(query, originalQuery, env) {
-  try {
-    if (!env.BRAVE_API_KEY) {
-      return { url: '', title: '', error: 'BRAVE_API_KEY non configurata' };
-    }
-    
-    const apiUrl = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=10`;
-    
-    const response = await fetch(apiUrl, {
-      headers: {
-        'Accept': 'application/json',
-        'Accept-Encoding': 'gzip',
-        'X-Subscription-Token': env.BRAVE_API_KEY
-      }
-    });
-    
-    if (!response.ok) {
-      return { url: '', title: '', error: `Errore Brave API HTTP ${response.status}` };
-    }
-    
-    const data = await response.json();
-    
-    if (!data.web || !data.web.results || data.web.results.length === 0) {
-      return { url: '', title: '', error: 'Nessun risultato trovato su Brave' };
-    }
-    
-    const results = [];
-    
-    for (const result of data.web.results) {
-      const url = result.url;
-      const title = result.title || '';
-      const description = result.description || '';
-      
-      const titleSimilarity = calculateSimilarity(title, originalQuery);
-      const descSimilarity = calculateSimilarity(description, originalQuery);
-      const similarity = Math.max(titleSimilarity, descSimilarity * 0.8);
-      
-      results.push({ url, title, description, similarity });
-    }
-    
-    if (results.length > 0) {
-      results.sort((a, b) => b.similarity - a.similarity);
-      return { url: results[0].url, title: results[0].title, error: null };
-    }
-    
-    return { url: '', title: '', error: 'Nessun risultato trovato su Brave' };
-  } catch (error) {
-    return { url: '', title: '', error: `Errore Brave: ${error.message}` };
-  }
+/* COMMENTED OUT - Other search engines
+
+async function searchDuckDuckGo(query, originalQuery) {
+  // ... DuckDuckGo code commented
 }
+
+async function searchBrave(query, originalQuery, env) {
+  // ... Brave code commented
+}
+
+async function searchSerpAPI(query, originalQuery, env) {
+  // ... SerpAPI code commented
+}
+
+async function searchScraperAPI(query, originalQuery, env) {
+  // ... ScraperAPI code commented
+}
+
+*/
