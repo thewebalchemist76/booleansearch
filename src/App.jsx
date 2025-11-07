@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import './App.css'
 
 function App() {
@@ -8,30 +8,6 @@ function App() {
   const [progress, setProgress] = useState(0)
   const [results, setResults] = useState([])
   const [error, setError] = useState(null)
-
-  // --- Aggiunte per il tracciamento API ---
-  const [scraperApiUsage, setScraperApiUsage] = useState(0)
-  const [scraperApiLimit] = useState(1000) // Imposta il tuo limite mensile
-  // --- Fine aggiunte ---
-
-  // Effetto per caricare l'uso API dal localStorage al montaggio del componente
-  useEffect(() => {
-    const currentMonth = new Date().getMonth()
-    const storedMonth = localStorage.getItem('scraperApiMonth')
-
-    if (storedMonth && parseInt(storedMonth, 10) === currentMonth) {
-      // Se è lo stesso mese, carica l'uso salvato
-      const storedUsage = localStorage.getItem('scraperApiUsage')
-      if (storedUsage) {
-        setScraperApiUsage(parseInt(storedUsage, 10))
-      }
-    } else {
-      // Se è un nuovo mese, resetta il contatore
-      setScraperApiUsage(0)
-      localStorage.setItem('scraperApiUsage', '0')
-      localStorage.setItem('scraperApiMonth', String(currentMonth))
-    }
-  }, []) // L'array vuoto [] assicura che venga eseguito solo una volta
 
   const normalizeDomain = (domain) => {
     if (!domain) return ''
@@ -75,9 +51,6 @@ function App() {
     const totalSearches = domainList.length * articleList.length
     let completed = 0
     const searchResults = []
-    
-    // --- Aggiunta: Inizializza il contatore per questa sessione di ricerca ---
-    let scraperApiCount = 0
 
     try {
       for (const article of articleList) {
@@ -96,16 +69,11 @@ function App() {
 
             const data = await response.json()
             
-            // --- Aggiunta: Incrementa se l'API è stata usata ---
-            if (data.usedScraperAPI) {
-              scraperApiCount++
-            }
-            // --- Fine aggiunta ---
-            
+            // FIX: Rimuovi il .* dalla query
             searchResults.push({
               domain,
               article,
-              searchQuery: `site:${domain} "${article}"`,
+              searchQuery: `site:${domain} "${article}"`, // CORRETTO: tolto .*
               url: data.url || '',
               title: data.title || '',
               error: data.error || null,
@@ -118,7 +86,7 @@ function App() {
             searchResults.push({
               domain,
               article,
-              searchQuery: `site:${domain} "${article}"`,
+              searchQuery: `site:${domain} "${article}"`, // CORRETTO: tolto .*
               url: '',
               title: '',
               error: err.message,
@@ -130,16 +98,9 @@ function App() {
           }
 
           // Small delay to avoid rate limiting
-          await new Promise(resolve => setTimeout(resolve, 3000)) // Aumentato a 3 secondi
+          await new Promise(resolve => setTimeout(resolve, 3000)) // Aumentato a 1 secondo
         }
       }
-
-      // --- Aggiunta: Aggiorna lo stato e il localStorage ---
-      const newUsage = scraperApiUsage + scraperApiCount
-      setScraperApiUsage(newUsage)
-      localStorage.setItem('scraperApiUsage', String(newUsage))
-      localStorage.setItem('scraperApiMonth', String(new Date().getMonth())) // Salva anche il mese
-      // --- Fine aggiunta ---
 
       setResults(searchResults)
     } catch (err) {
@@ -180,36 +141,12 @@ function App() {
     link.click()
   }
 
-  // --- Aggiunta: Calcoli per il render ---
-  const remaining = scraperApiLimit - scraperApiUsage
-  const percentageUsed = (scraperApiUsage / scraperApiLimit) * 100
-  // --- Fine aggiunta ---
-
   return (
     <div className="app">
       <div className="container">
         <header className="header">
           <h1>🔍 Search Engine Finder</h1>
           <p className="subtitle">Cerca articoli su più domini simultaneamente</p>
-          
-          {/* --- Aggiunta: Visualizzazione crediti API --- */}
-          <div className="api-usage">
-            <p>
-              <strong>Crediti ScraperAPI:</strong> {remaining < 0 ? 0 : remaining} / {scraperApiLimit} rimanenti
-            </p>
-            {/* Suggerimento: Aggiungi queste classi al tuo CSS per la barra di progresso
-              .api-usage-bar-container { background: #eee; border-radius: 4px; height: 8px; overflow: hidden; }
-              .api-usage-bar { background: #007bff; height: 100%; transition: width 0.3s; }
-            */}
-            <div className="api-usage-bar-container">
-              <div 
-                className="api-usage-bar" 
-                style={{ width: `${percentageUsed > 100 ? 100 : percentageUsed}%` }}
-              ></div>
-            </div>
-          </div>
-          {/* --- Fine aggiunta --- */}
-
         </header>
 
         <div className="form-section">
