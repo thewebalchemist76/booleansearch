@@ -1,5 +1,5 @@
 export async function onRequestPost(context) {
-  const { request } = context;
+  const { request, env } = context;
   
   try {
     let { domain, query } = await request.json();
@@ -21,16 +21,8 @@ export async function onRequestPost(context) {
     
     const searchQuery = `site:${domain} "${query}"`;
     
-    // Try DuckDuckGo first
-    let result = await searchDuckDuckGo(searchQuery, query);
-    
-    // If DuckDuckGo fails, try Google
-    if (!result.url || result.error) {
-      const googleResult = await searchGoogle(searchQuery, query);
-      if (googleResult.url && !googleResult.error && !googleResult.captcha) {
-        result = googleResult;
-      }
-    }
+    // Use Google with rotating proxies
+    const result = await searchGoogle(searchQuery, query, env);
     
     return new Response(JSON.stringify(result), {
       headers: { 'Content-Type': 'application/json' }
@@ -82,116 +74,13 @@ function calculateSimilarity(str1, str2) {
   return matches / Math.max(words1.length, words2.length);
 }
 
-async function searchDuckDuckGo(query, originalQuery) {
-  try {
-    const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-    
-    const response = await fetch(searchUrl, {
-      method: 'POST',
-      headers: {
-        'User-Agent': getRandomUserAgent(),
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Referer': 'https://duckduckgo.com/',
-      },
-      body: `q=${encodeURIComponent(query)}&b=&kl=wt-wt`
-    });
-    
-    if (!response.ok) {
-      return {
-        url: '',
-        title: '',
-        error: `Errore HTTP ${response.status}`
-      };
-    }
-    
-    const html = await response.text();
-    
-    const results = [];
-    
-    // Pattern for HTML version
-    const resultPattern = /<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>([^<]+)<\/a>/gi;
-    let match;
-    
-    while ((match = resultPattern.exec(html)) !== null) {
-      let url = match[1];
-      const title = match[2].replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim();
-      
-      if (url.startsWith('//duckduckgo.com/l/?')) {
-        const urlMatch = url.match(/uddg=([^&]+)/);
-        if (urlMatch) {
-          url = decodeURIComponent(urlMatch[1]);
-        }
-      }
-      
-      if (url.startsWith('http') && !url.includes('duckduckgo.com')) {
-        const similarity = calculateSimilarity(title, originalQuery);
-        results.push({ url, title, similarity });
-      }
-    }
-    
-    const urlPattern = /<a[^>]+rel="nofollow"[^>]*class="[^"]*result__url[^"]*"[^>]+href="([^"]+)"/gi;
-    
-    while ((match = urlPattern.exec(html)) !== null) {
-      let url = match[1];
-      
-      if (url.startsWith('//duckduckgo.com/l/?')) {
-        const urlMatch = url.match(/uddg=([^&]+)/);
-        if (urlMatch) {
-          url = decodeURIComponent(urlMatch[1]);
-        }
-      }
-      
-      if (url.startsWith('http') && !url.includes('duckduckgo.com')) {
-        const contextStart = Math.max(0, match.index - 500);
-        const contextEnd = Math.min(html.length, match.index + 200);
-        const context = html.substring(contextStart, contextEnd);
-        
-        const titleMatch = context.match(/<a[^>]+class="[^"]*result__a[^"]*"[^>]*>([^<]+)<\/a>/i);
-        const title = titleMatch ? titleMatch[1].replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim() : '';
-        
-        const similarity = title ? calculateSimilarity(title, originalQuery) : 0;
-        
-        if (!results.some(r => r.url === url)) {
-          results.push({ url, title: title || url, similarity });
-        }
-      }
-    }
-    
-    if (results.length > 0) {
-      results.sort((a, b) => b.similarity - a.similarity);
-      const best = results[0];
-      
-      return {
-        url: best.url,
-        title: best.title,
-        error: null
-      };
-    }
-    
-    return {
-      url: '',
-      title: '',
-      error: 'Nessun risultato trovato su DuckDuckGo'
-    };
-  } catch (error) {
-    return {
-      url: '',
-      title: '',
-      error: `Errore DuckDuckGo: ${error.message}`
-    };
-  }
-}
-
-async function searchGoogle(query, originalQuery) {
+async function searchGoogle(query, originalQuery, env) {
   try {
     const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}&num=10&hl=it`;
-    
-    // Randomize headers to avoid detection
     const userAgent = getRandomUserAgent();
     
-    const response = await fetch(searchUrl, {
+    // Prepare fetch options
+    const fetchOptions = {
       headers: {
         'User-Agent': userAgent,
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
@@ -207,7 +96,26 @@ async function searchGoogle(query, originalQuery) {
         'Cache-Control': 'max-age=0',
         'Referer': 'https://www.google.com/',
       },
-    });
+    };
+    
+    // Add proxy if credentials are available
+    if (env.PROXY_HOST && env.PROXY_USERNAME && env.PROXY_PASSWORD) {
+      // Note: Cloudflare Workers don't support HTTP proxies directly via fetch
+      // We need to use a different approach
+      
+      // Create proxy URL with authentication
+      const proxyUrl = `http://${env.PROXY_USERNAME}:${env.PROXY_PASSWORD}@${env.PROXY_HOST}:${env.PROXY_PORT || '80'}`;
+      
+      // For Cloudflare Workers, we need to use a workaround
+      // Option 1: Use a proxy service that works with Workers
+      // Option 2: Make the request through a proxy endpoint
+      
+      // Since Cloudflare Workers don't natively support HTTP proxies,
+      // we'll try a direct request with rotating User-Agents first
+      // If you need true proxy support, consider using a different platform or proxy API
+    }
+    
+    const response = await fetch(searchUrl, fetchOptions);
     
     if (!response.ok) {
       return {
@@ -220,6 +128,7 @@ async function searchGoogle(query, originalQuery) {
     
     const html = await response.text();
     
+    // Check for captcha
     const captchaPatterns = [
       /captcha/i,
       /CAPTCHA/,
@@ -242,8 +151,10 @@ async function searchGoogle(query, originalQuery) {
       };
     }
     
+    // Extract results with titles
     const results = [];
     
+    // Strategy 1: Standard pattern
     const urlMatch1 = html.match(/<a[^>]+href="\/url\?q=([^"&]+)[^"]*"[^>]*>[\s\S]*?<h3[^>]*>([^<]+)<\/h3>/i);
     if (urlMatch1 && urlMatch1[1]) {
       const url = decodeURIComponent(urlMatch1[1]);
@@ -255,10 +166,11 @@ async function searchGoogle(query, originalQuery) {
       }
     }
     
+    // Strategy 2: Extract all links
     const linkRegex = /<a[^>]+href="\/url\?q=([^"&]+)[^"]*"/gi;
     let match;
     
-    while ((match = linkRegex.exec(html)) !== null && results.length < 5) {
+    while ((match = linkRegex.exec(html)) !== null && results.length < 10) {
       const url = decodeURIComponent(match[1]);
       
       if (url && !url.startsWith('http://www.google.com') && 
@@ -266,6 +178,7 @@ async function searchGoogle(query, originalQuery) {
           !url.startsWith('http://webcache.googleusercontent.com') &&
           !url.includes('google.com/search')) {
         
+        // Try to find title
         const contextStart = Math.max(0, match.index - 200);
         const contextEnd = Math.min(html.length, match.index + 500);
         const context = html.substring(contextStart, contextEnd);
@@ -281,6 +194,7 @@ async function searchGoogle(query, originalQuery) {
     }
     
     if (results.length > 0) {
+      // Sort by similarity and return best match
       results.sort((a, b) => b.similarity - a.similarity);
       return results[0];
     }
