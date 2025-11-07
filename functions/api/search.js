@@ -13,7 +13,7 @@ export async function onRequestPost(context) {
       });
     }
     
-    // FIX: Pulisci il dominio da qualsiasi carattere strano
+    // FIX: Pulisci il dominio
     domain = domain.replace(/\.\*$/, '')
                    .replace(/\*$/, '')
                    .replace(/\.$/, '')
@@ -21,10 +21,13 @@ export async function onRequestPost(context) {
     
     const searchQuery = `site:${domain} "${query}"`;
     
-    // Try DuckDuckGo first (no captcha)
+    // Try multiple search engines in sequence
     let result = await searchDuckDuckGo(searchQuery);
     
-    // If DuckDuckGo fails, try Google
+    if (!result.url || result.error) {
+      result = await searchBrave(searchQuery);
+    }
+    
     if (!result.url || result.error) {
       const googleResult = await searchGoogle(searchQuery);
       if (googleResult.url && !googleResult.error && !googleResult.captcha) {
@@ -47,14 +50,14 @@ export async function onRequestPost(context) {
 
 async function searchDuckDuckGo(query) {
   try {
-    const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+    // Try regular DuckDuckGo endpoint first
+    const searchUrl = `https://duckduckgo.com/?q=${encodeURIComponent(query)}&t=h_&ia=web`;
     
     const response = await fetch(searchUrl, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
         'Accept-Language': 'it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Referer': 'https://duckduckgo.com/',
       },
     });
     
@@ -68,57 +71,62 @@ async function searchDuckDuckGo(query) {
     
     const html = await response.text();
     
-    // Parse DuckDuckGo results based on the HTML structure
-    // Strategy 1: Find result-title-a link (most reliable)
-    const titleLinkPattern = /<a[^>]+href="([^"]+)"[^>]*data-testid="result-title-a"[^>]*>[\s\S]*?<span[^>]*>([^<]+)<\/span>/i;
-    const titleMatch = html.match(titleLinkPattern);
+    // Multiple strategies for parsing DuckDuckGo
     
-    if (titleMatch && titleMatch[1]) {
-      const url = titleMatch[1];
-      const title = titleMatch[2].replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim();
-      
-      // Skip DuckDuckGo internal links
-      if (url.startsWith('http') && !url.includes('duckduckgo.com')) {
-        return {
-          url: url,
-          title: title || url,
-          error: null
-        };
+    // Strategy 1: Look for data-testid="result-title-a"
+    const patterns = [
+      // Pattern from your HTML
+      /<a[^>]+href="(https?:\/\/[^"]+)"[^>]*data-testid="result-title-a"[^>]*>[\s\S]*?<span[^>]*>([^<]+)<\/span>/i,
+      // Alternative pattern
+      /<a[^>]+data-testid="result-title-a"[^>]*href="(https?:\/\/[^"]+)"[^>]*>[\s\S]*?<span[^>]*>([^<]+)<\/span>/i,
+      // Simpler pattern
+      /data-testid="result-title-a"[^>]*href="(https?:\/\/[^"]+)"/i,
+    ];
+    
+    for (const pattern of patterns) {
+      const match = html.match(pattern);
+      if (match && match[1]) {
+        const url = match[1];
+        const title = match[2] ? match[2].replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim() : '';
+        
+        if (url.startsWith('http') && !url.includes('duckduckgo.com')) {
+          return {
+            url: url,
+            title: title || url,
+            error: null
+          };
+        }
       }
     }
     
-    // Strategy 2: Find result-extras-url-link
-    const urlLinkPattern = /<a[^>]+href="([^"]+)"[^>]*data-testid="result-extras-url-link"/i;
+    // Strategy 2: Look for result-extras-url-link
+    const urlLinkPattern = /<a[^>]+href="(https?:\/\/[^"]+)"[^>]*data-testid="result-extras-url-link"/i;
     const urlMatch = html.match(urlLinkPattern);
     
     if (urlMatch && urlMatch[1]) {
       const url = urlMatch[1];
-      
       if (url.startsWith('http') && !url.includes('duckduckgo.com')) {
-        // Try to find title
-        let title = '';
-        const titlePattern = /<h2[^>]*>[\s\S]*?<a[^>]+href="[^"]*"[^>]*data-testid="result-title-a"[^>]*>[\s\S]*?<span[^>]*>([^<]+)<\/span>/i;
-        const titleMatch2 = html.match(titlePattern);
-        if (titleMatch2) {
-          title = titleMatch2[1].replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim();
-        }
-        
         return {
           url: url,
-          title: title || url,
+          title: url,
           error: null
         };
       }
     }
     
-    // Strategy 3: Find all result links
-    const linkRegex = /<a[^>]+href="(https?:\/\/[^"]+)"[^>]*data-testid="result-title-a"/gi;
-    const links = [];
+    // Strategy 3: Generic link search
+    const linkRegex = /<a[^>]+href="(https?:\/\/(?!duckduckgo\.com)[^"]+)"/gi;
     let match;
+    const links = [];
     
-    while ((match = linkRegex.exec(html)) !== null && links.length < 5) {
+    while ((match = linkRegex.exec(html)) !== null && links.length < 10) {
       const url = match[1];
-      if (!url.includes('duckduckgo.com')) {
+      // Filter out common non-result links
+      if (!url.includes('duckduckgo.com') && 
+          !url.includes('mailto:') &&
+          !url.includes('javascript:') &&
+          !url.includes('.ico') &&
+          !url.includes('/favicon')) {
         links.push(url);
       }
     }
@@ -141,6 +149,87 @@ async function searchDuckDuckGo(query) {
       url: '',
       title: '',
       error: `Errore DuckDuckGo: ${error.message}`
+    };
+  }
+}
+
+async function searchBrave(query) {
+  try {
+    const searchUrl = `https://search.brave.com/search?q=${encodeURIComponent(query)}&source=web`;
+    
+    const response = await fetch(searchUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7',
+      },
+    });
+    
+    if (!response.ok) {
+      return {
+        url: '',
+        title: '',
+        error: `Errore HTTP ${response.status}`
+      };
+    }
+    
+    const html = await response.text();
+    
+    // Parse Brave results
+    // Brave uses different patterns
+    const patterns = [
+      // Standard Brave result
+      /<a[^>]+href="(https?:\/\/[^"]+)"[^>]*class="[^"]*result-header[^"]*"/i,
+      // Alternative pattern
+      /<div[^>]*class="[^"]*snippet[^"]*"[^>]*>[\s\S]*?<a[^>]+href="(https?:\/\/[^"]+)"/i,
+    ];
+    
+    for (const pattern of patterns) {
+      const match = html.match(pattern);
+      if (match && match[1]) {
+        const url = match[1];
+        if (url.startsWith('http') && !url.includes('brave.com/search')) {
+          return {
+            url: url,
+            title: url,
+            error: null
+          };
+        }
+      }
+    }
+    
+    // Generic search for external links
+    const linkRegex = /<a[^>]+href="(https?:\/\/(?!search\.brave\.com)[^"]+)"/gi;
+    let match;
+    const links = [];
+    
+    while ((match = linkRegex.exec(html)) !== null && links.length < 10) {
+      const url = match[1];
+      if (!url.includes('brave.com') && 
+          !url.includes('mailto:') &&
+          !url.includes('.ico')) {
+        links.push(url);
+      }
+    }
+    
+    if (links.length > 0) {
+      return {
+        url: links[0],
+        title: links[0],
+        error: null
+      };
+    }
+    
+    return {
+      url: '',
+      title: '',
+      error: 'Nessun risultato trovato su Brave'
+    };
+  } catch (error) {
+    return {
+      url: '',
+      title: '',
+      error: `Errore Brave: ${error.message}`
     };
   }
 }
@@ -169,7 +258,6 @@ async function searchGoogle(query) {
     
     const html = await response.text();
     
-    // Check for captcha
     const captchaPatterns = [
       /captcha/i,
       /CAPTCHA/,
@@ -192,8 +280,6 @@ async function searchGoogle(query) {
       };
     }
     
-    // Multiple parsing strategies for Google results
-    // Strategy 1: Standard result link pattern
     const urlMatch1 = html.match(/<a[^>]+href="\/url\?q=([^"&]+)[^"]*"[^>]*>[\s\S]*?<h3[^>]*>([^<]+)<\/h3>/i);
     if (urlMatch1 && urlMatch1[1]) {
       const url = decodeURIComponent(urlMatch1[1]);
@@ -209,7 +295,6 @@ async function searchGoogle(query) {
       }
     }
     
-    // Strategy 2: Extract all result links
     const linkRegex = /<a[^>]+href="\/url\?q=([^"&]+)[^"]*"/gi;
     const links = [];
     let match;
@@ -224,33 +309,9 @@ async function searchGoogle(query) {
     }
     
     if (links.length > 0) {
-      const firstUrl = links[0];
-      let title = '';
-      
-      const linkIndex = html.indexOf(`/url?q=${encodeURIComponent(firstUrl)}`);
-      if (linkIndex > -1) {
-        const context = html.substring(Math.max(0, linkIndex - 500), linkIndex + 1000);
-        const titleMatch = context.match(/<h3[^>]*>([^<]+)<\/h3>/i);
-        if (titleMatch) {
-          title = titleMatch[1].replace(/<[^>]+>/g, '').trim();
-        }
-      }
-      
       return {
-        url: firstUrl,
-        title: title || firstUrl,
-        captcha: false,
-        error: null
-      };
-    }
-    
-    // Strategy 3: Try to find any external link
-    const externalLinkRegex = /href="(https?:\/\/[^"]+)"[^>]*class="[^"]*yuRUbf[^"]*"/i;
-    const externalMatch = html.match(externalLinkRegex);
-    if (externalMatch && externalMatch[1]) {
-      return {
-        url: externalMatch[1],
-        title: externalMatch[1],
+        url: links[0],
+        title: links[0],
         captcha: false,
         error: null
       };
