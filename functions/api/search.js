@@ -45,18 +45,28 @@ export async function onRequestPost(context) {
   }
 }
 
+// Helper to get random User-Agent
+function getRandomUserAgent() {
+  const userAgents = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+  ];
+  
+  return userAgents[Math.floor(Math.random() * userAgents.length)];
+}
+
 // Helper function to calculate string similarity
 function calculateSimilarity(str1, str2) {
   const s1 = str1.toLowerCase().trim();
   const s2 = str2.toLowerCase().trim();
   
-  // Exact match
   if (s1 === s2) return 1.0;
-  
-  // Check if one contains the other
   if (s1.includes(s2) || s2.includes(s1)) return 0.8;
   
-  // Count matching words
   const words1 = s1.split(/\s+/);
   const words2 = s2.split(/\s+/);
   let matches = 0;
@@ -74,13 +84,12 @@ function calculateSimilarity(str1, str2) {
 
 async function searchDuckDuckGo(query, originalQuery) {
   try {
-    // Use the HTML-only endpoint for easier parsing
     const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
     
     const response = await fetch(searchUrl, {
       method: 'POST',
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'User-Agent': getRandomUserAgent(),
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
         'Accept-Language': 'it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7',
         'Content-Type': 'application/x-www-form-urlencoded',
@@ -99,10 +108,9 @@ async function searchDuckDuckGo(query, originalQuery) {
     
     const html = await response.text();
     
-    // DuckDuckGo HTML version has simpler structure
     const results = [];
     
-    // Pattern for HTML version: <a class="result__a" href="URL">TITLE</a>
+    // Pattern for HTML version
     const resultPattern = /<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>([^<]+)<\/a>/gi;
     let match;
     
@@ -110,9 +118,7 @@ async function searchDuckDuckGo(query, originalQuery) {
       let url = match[1];
       const title = match[2].replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim();
       
-      // DuckDuckGo HTML wraps URLs, need to decode
       if (url.startsWith('//duckduckgo.com/l/?')) {
-        // Extract the actual URL from redirect
         const urlMatch = url.match(/uddg=([^&]+)/);
         if (urlMatch) {
           url = decodeURIComponent(urlMatch[1]);
@@ -125,13 +131,11 @@ async function searchDuckDuckGo(query, originalQuery) {
       }
     }
     
-    // Alternative pattern: <a rel="nofollow" class="result__url" href="URL">
     const urlPattern = /<a[^>]+rel="nofollow"[^>]*class="[^"]*result__url[^"]*"[^>]+href="([^"]+)"/gi;
     
     while ((match = urlPattern.exec(html)) !== null) {
       let url = match[1];
       
-      // Decode DuckDuckGo redirect
       if (url.startsWith('//duckduckgo.com/l/?')) {
         const urlMatch = url.match(/uddg=([^&]+)/);
         if (urlMatch) {
@@ -140,7 +144,6 @@ async function searchDuckDuckGo(query, originalQuery) {
       }
       
       if (url.startsWith('http') && !url.includes('duckduckgo.com')) {
-        // Try to find the title for this URL
         const contextStart = Math.max(0, match.index - 500);
         const contextEnd = Math.min(html.length, match.index + 200);
         const context = html.substring(contextStart, contextEnd);
@@ -150,14 +153,12 @@ async function searchDuckDuckGo(query, originalQuery) {
         
         const similarity = title ? calculateSimilarity(title, originalQuery) : 0;
         
-        // Avoid duplicates
         if (!results.some(r => r.url === url)) {
           results.push({ url, title: title || url, similarity });
         }
       }
     }
     
-    // Sort by similarity and return the best match
     if (results.length > 0) {
       results.sort((a, b) => b.similarity - a.similarity);
       const best = results[0];
@@ -187,11 +188,23 @@ async function searchGoogle(query, originalQuery) {
   try {
     const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}&num=10&hl=it`;
     
+    // Randomize headers to avoid detection
+    const userAgent = getRandomUserAgent();
+    
     const response = await fetch(searchUrl, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'User-Agent': userAgent,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
         'Accept-Language': 'it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'DNT': '1',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-User': '?1',
+        'Cache-Control': 'max-age=0',
         'Referer': 'https://www.google.com/',
       },
     });
@@ -229,7 +242,6 @@ async function searchGoogle(query, originalQuery) {
       };
     }
     
-    // Extract results with titles
     const results = [];
     
     const urlMatch1 = html.match(/<a[^>]+href="\/url\?q=([^"&]+)[^"]*"[^>]*>[\s\S]*?<h3[^>]*>([^<]+)<\/h3>/i);
@@ -254,7 +266,6 @@ async function searchGoogle(query, originalQuery) {
           !url.startsWith('http://webcache.googleusercontent.com') &&
           !url.includes('google.com/search')) {
         
-        // Try to find title
         const contextStart = Math.max(0, match.index - 200);
         const contextEnd = Math.min(html.length, match.index + 500);
         const context = html.substring(contextStart, contextEnd);
