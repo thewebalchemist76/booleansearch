@@ -22,14 +22,14 @@ export async function onRequestPost(context) {
     const searchQuery = `site:${domain} "${query}"`;
     
     // Try multiple search engines in sequence
-    let result = await searchDuckDuckGo(searchQuery);
+    let result = await searchDuckDuckGo(searchQuery, query);
     
     if (!result.url || result.error) {
-      result = await searchBrave(searchQuery);
+      result = await searchBrave(searchQuery, query);
     }
     
     if (!result.url || result.error) {
-      const googleResult = await searchGoogle(searchQuery);
+      const googleResult = await searchGoogle(searchQuery, query);
       if (googleResult.url && !googleResult.error && !googleResult.captcha) {
         result = googleResult;
       }
@@ -48,9 +48,35 @@ export async function onRequestPost(context) {
   }
 }
 
-async function searchDuckDuckGo(query) {
+// Helper function to calculate string similarity
+function calculateSimilarity(str1, str2) {
+  const s1 = str1.toLowerCase().trim();
+  const s2 = str2.toLowerCase().trim();
+  
+  // Exact match
+  if (s1 === s2) return 1.0;
+  
+  // Check if one contains the other
+  if (s1.includes(s2) || s2.includes(s1)) return 0.8;
+  
+  // Count matching words
+  const words1 = s1.split(/\s+/);
+  const words2 = s2.split(/\s+/);
+  let matches = 0;
+  
+  for (const word1 of words1) {
+    for (const word2 of words2) {
+      if (word1.length > 3 && word2.length > 3 && word1 === word2) {
+        matches++;
+      }
+    }
+  }
+  
+  return matches / Math.max(words1.length, words2.length);
+}
+
+async function searchDuckDuckGo(query, originalQuery) {
   try {
-    // Try regular DuckDuckGo endpoint first
     const searchUrl = `https://duckduckgo.com/?q=${encodeURIComponent(query)}&t=h_&ia=web`;
     
     const response = await fetch(searchUrl, {
@@ -71,57 +97,65 @@ async function searchDuckDuckGo(query) {
     
     const html = await response.text();
     
-    // Multiple strategies for parsing DuckDuckGo
+    // Extract all potential results with titles
+    const results = [];
     
-    // Strategy 1: Look for data-testid="result-title-a"
-    const patterns = [
-      // Pattern from your HTML
-      /<a[^>]+href="(https?:\/\/[^"]+)"[^>]*data-testid="result-title-a"[^>]*>[\s\S]*?<span[^>]*>([^<]+)<\/span>/i,
-      // Alternative pattern
-      /<a[^>]+data-testid="result-title-a"[^>]*href="(https?:\/\/[^"]+)"[^>]*>[\s\S]*?<span[^>]*>([^<]+)<\/span>/i,
-      // Simpler pattern
-      /data-testid="result-title-a"[^>]*href="(https?:\/\/[^"]+)"/i,
-    ];
+    // Pattern 1: data-testid="result-title-a" with title
+    const titlePattern = /<a[^>]+href="(https?:\/\/[^"]+)"[^>]*data-testid="result-title-a"[^>]*>[\s\S]*?<span[^>]*>([^<]+)<\/span>/gi;
+    let match;
     
-    for (const pattern of patterns) {
-      const match = html.match(pattern);
-      if (match && match[1]) {
-        const url = match[1];
-        const title = match[2] ? match[2].replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim() : '';
+    while ((match = titlePattern.exec(html)) !== null) {
+      const url = match[1];
+      const title = match[2].replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim();
+      
+      if (url.startsWith('http') && !url.includes('duckduckgo.com')) {
+        const similarity = calculateSimilarity(title, originalQuery);
+        results.push({ url, title, similarity });
+      }
+    }
+    
+    // Pattern 2: result-extras-url-link
+    const urlPattern = /<a[^>]+href="(https?:\/\/[^"]+)"[^>]*data-testid="result-extras-url-link"/gi;
+    
+    while ((match = urlPattern.exec(html)) !== null) {
+      const url = match[1];
+      
+      if (url.startsWith('http') && !url.includes('duckduckgo.com')) {
+        // Try to find associated title
+        const contextStart = Math.max(0, match.index - 1000);
+        const contextEnd = Math.min(html.length, match.index + 500);
+        const context = html.substring(contextStart, contextEnd);
         
-        if (url.startsWith('http') && !url.includes('duckduckgo.com')) {
-          return {
-            url: url,
-            title: title || url,
-            error: null
-          };
+        const titleMatch = context.match(/<span[^>]*class="[^"]*LQVY1Jpkk8nyJ6HBWKAk[^"]*"[^>]*>([^<]+)<\/span>/i);
+        const title = titleMatch ? titleMatch[1].replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim() : '';
+        
+        const similarity = title ? calculateSimilarity(title, originalQuery) : 0;
+        
+        // Avoid duplicates
+        if (!results.some(r => r.url === url)) {
+          results.push({ url, title: title || url, similarity });
         }
       }
     }
     
-    // Strategy 2: Look for result-extras-url-link
-    const urlLinkPattern = /<a[^>]+href="(https?:\/\/[^"]+)"[^>]*data-testid="result-extras-url-link"/i;
-    const urlMatch = html.match(urlLinkPattern);
-    
-    if (urlMatch && urlMatch[1]) {
-      const url = urlMatch[1];
-      if (url.startsWith('http') && !url.includes('duckduckgo.com')) {
-        return {
-          url: url,
-          title: url,
-          error: null
-        };
-      }
+    // Sort by similarity and return the best match
+    if (results.length > 0) {
+      results.sort((a, b) => b.similarity - a.similarity);
+      const best = results[0];
+      
+      return {
+        url: best.url,
+        title: best.title,
+        error: null
+      };
     }
     
-    // Strategy 3: Generic link search
+    // Fallback: generic link search
     const linkRegex = /<a[^>]+href="(https?:\/\/(?!duckduckgo\.com)[^"]+)"/gi;
-    let match;
     const links = [];
     
     while ((match = linkRegex.exec(html)) !== null && links.length < 10) {
       const url = match[1];
-      // Filter out common non-result links
       if (!url.includes('duckduckgo.com') && 
           !url.includes('mailto:') &&
           !url.includes('javascript:') &&
@@ -153,7 +187,7 @@ async function searchDuckDuckGo(query) {
   }
 }
 
-async function searchBrave(query) {
+async function searchBrave(query, originalQuery) {
   try {
     const searchUrl = `https://search.brave.com/search?q=${encodeURIComponent(query)}&source=web`;
     
@@ -175,47 +209,35 @@ async function searchBrave(query) {
     
     const html = await response.text();
     
-    // Parse Brave results
-    // Brave uses different patterns
+    // Extract results with titles
+    const results = [];
+    
+    // Brave result patterns
     const patterns = [
-      // Standard Brave result
-      /<a[^>]+href="(https?:\/\/[^"]+)"[^>]*class="[^"]*result-header[^"]*"/i,
-      // Alternative pattern
-      /<div[^>]*class="[^"]*snippet[^"]*"[^>]*>[\s\S]*?<a[^>]+href="(https?:\/\/[^"]+)"/i,
+      /<a[^>]+href="(https?:\/\/[^"]+)"[^>]*class="[^"]*result-header[^"]*"[^>]*>([^<]+)<\/a>/gi,
+      /<div[^>]*class="[^"]*snippet-title[^"]*"[^>]*>[\s\S]*?<a[^>]+href="(https?:\/\/[^"]+)"[^>]*>([^<]+)<\/a>/gi,
     ];
     
     for (const pattern of patterns) {
-      const match = html.match(pattern);
-      if (match && match[1]) {
+      let match;
+      while ((match = pattern.exec(html)) !== null) {
         const url = match[1];
+        const title = match[2] ? match[2].replace(/<[^>]+>/g, '').trim() : '';
+        
         if (url.startsWith('http') && !url.includes('brave.com/search')) {
-          return {
-            url: url,
-            title: url,
-            error: null
-          };
+          const similarity = calculateSimilarity(title, originalQuery);
+          results.push({ url, title: title || url, similarity });
         }
       }
     }
     
-    // Generic search for external links
-    const linkRegex = /<a[^>]+href="(https?:\/\/(?!search\.brave\.com)[^"]+)"/gi;
-    let match;
-    const links = [];
-    
-    while ((match = linkRegex.exec(html)) !== null && links.length < 10) {
-      const url = match[1];
-      if (!url.includes('brave.com') && 
-          !url.includes('mailto:') &&
-          !url.includes('.ico')) {
-        links.push(url);
-      }
-    }
-    
-    if (links.length > 0) {
+    if (results.length > 0) {
+      results.sort((a, b) => b.similarity - a.similarity);
+      const best = results[0];
+      
       return {
-        url: links[0],
-        title: links[0],
+        url: best.url,
+        title: best.title,
         error: null
       };
     }
@@ -234,7 +256,7 @@ async function searchBrave(query) {
   }
 }
 
-async function searchGoogle(query) {
+async function searchGoogle(query, originalQuery) {
   try {
     const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}&num=10&hl=it`;
     
@@ -280,41 +302,49 @@ async function searchGoogle(query) {
       };
     }
     
+    // Extract results with titles
+    const results = [];
+    
     const urlMatch1 = html.match(/<a[^>]+href="\/url\?q=([^"&]+)[^"]*"[^>]*>[\s\S]*?<h3[^>]*>([^<]+)<\/h3>/i);
     if (urlMatch1 && urlMatch1[1]) {
       const url = decodeURIComponent(urlMatch1[1]);
       const title = urlMatch1[2] ? urlMatch1[2].replace(/<[^>]+>/g, '').trim() : '';
       
       if (url && !url.startsWith('http://www.google.com') && !url.startsWith('https://www.google.com')) {
-        return {
-          url: url,
-          title: title,
-          captcha: false,
-          error: null
-        };
+        const similarity = calculateSimilarity(title, originalQuery);
+        results.push({ url, title, similarity, captcha: false, error: null });
       }
     }
     
     const linkRegex = /<a[^>]+href="\/url\?q=([^"&]+)[^"]*"/gi;
-    const links = [];
     let match;
-    while ((match = linkRegex.exec(html)) !== null && links.length < 5) {
+    
+    while ((match = linkRegex.exec(html)) !== null && results.length < 5) {
       const url = decodeURIComponent(match[1]);
+      
       if (url && !url.startsWith('http://www.google.com') && 
           !url.startsWith('https://www.google.com') &&
           !url.startsWith('http://webcache.googleusercontent.com') &&
           !url.includes('google.com/search')) {
-        links.push(url);
+        
+        // Try to find title
+        const contextStart = Math.max(0, match.index - 200);
+        const contextEnd = Math.min(html.length, match.index + 500);
+        const context = html.substring(contextStart, contextEnd);
+        const titleMatch = context.match(/<h3[^>]*>([^<]+)<\/h3>/i);
+        const title = titleMatch ? titleMatch[1].replace(/<[^>]+>/g, '').trim() : '';
+        
+        const similarity = title ? calculateSimilarity(title, originalQuery) : 0;
+        
+        if (!results.some(r => r.url === url)) {
+          results.push({ url, title: title || url, similarity, captcha: false, error: null });
+        }
       }
     }
     
-    if (links.length > 0) {
-      return {
-        url: links[0],
-        title: links[0],
-        captcha: false,
-        error: null
-      };
+    if (results.length > 0) {
+      results.sort((a, b) => b.similarity - a.similarity);
+      return results[0];
     }
     
     return {
