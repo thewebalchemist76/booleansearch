@@ -98,7 +98,7 @@ function App() {
           }
 
           // Small delay to avoid rate limiting
-          await new Promise(resolve => setTimeout(resolve, 2000)) // Aumentato a 1 secondo
+          await new Promise(resolve => setTimeout(resolve, 3000)) // Aumentato a 1 secondo
         }
       }
 
