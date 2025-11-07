@@ -16,17 +16,12 @@ export async function onRequestPost(context) {
     domain = domain.replace(/\.\*$/, '').replace(/\*$/, '').replace(/\.$/, '').trim();
     const searchQuery = `site:${domain} "${query}"`;
     
-    // Try Brave first (fast)
-    let result = await searchBrave(searchQuery, query, env);
+    // Try SerpAPI (Google results via API)
+    let result = await searchSerpAPI(searchQuery, query, env);
     
-    // Try DuckDuckGo if Brave fails
+    // Fallback to Brave if SerpAPI fails or quota exceeded
     if (!result.url || result.error) {
-      result = await searchDuckDuckGo(searchQuery, query);
-    }
-    
-    // Try Google as last resort (slow and may fail with captcha)
-    if (!result.url || result.error) {
-      result = await searchGoogle(searchQuery, query);
+      result = await searchBrave(searchQuery, query, env);
     }
     
     return new Response(JSON.stringify(result), {
@@ -64,15 +59,97 @@ function calculateSimilarity(str1, str2) {
   return matches / Math.max(words1.length, words2.length);
 }
 
-function getRandomUserAgent() {
-  const userAgents = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-  ];
-  return userAgents[Math.floor(Math.random() * userAgents.length)];
+async function searchSerpAPI(query, originalQuery, env) {
+  try {
+    if (!env.SERPAPI_KEY) {
+      return {
+        url: '',
+        title: '',
+        error: 'SERPAPI_KEY non configurata'
+      };
+    }
+    
+    // SerpAPI endpoint for Google search
+    const apiUrl = `https://serpapi.com/search.json?engine=google&q=${encodeURIComponent(query)}&api_key=${env.SERPAPI_KEY}&gl=it&hl=it&num=10`;
+    
+    const response = await fetch(apiUrl, {
+      headers: {
+        'Accept': 'application/json'
+      }
+    });
+    
+    if (!response.ok) {
+      return {
+        url: '',
+        title: '',
+        error: `Errore SerpAPI HTTP ${response.status}`
+      };
+    }
+    
+    const data = await response.json();
+    
+    // Check for API errors
+    if (data.error) {
+      return {
+        url: '',
+        title: '',
+        error: data.error
+      };
+    }
+    
+    // Parse organic results
+    if (!data.organic_results || data.organic_results.length === 0) {
+      return {
+        url: '',
+        title: '',
+        error: 'Nessun risultato trovato su SerpAPI'
+      };
+    }
+    
+    const results = [];
+    
+    for (const result of data.organic_results) {
+      const url = result.link || '';
+      const title = result.title || '';
+      const snippet = result.snippet || '';
+      
+      if (url) {
+        const titleSimilarity = calculateSimilarity(title, originalQuery);
+        const snippetSimilarity = calculateSimilarity(snippet, originalQuery);
+        const similarity = Math.max(titleSimilarity, snippetSimilarity * 0.8);
+        
+        results.push({
+          url,
+          title,
+          snippet,
+          similarity
+        });
+      }
+    }
+    
+    if (results.length > 0) {
+      results.sort((a, b) => b.similarity - a.similarity);
+      const best = results[0];
+      
+      return {
+        url: best.url,
+        title: best.title,
+        error: null
+      };
+    }
+    
+    return {
+      url: '',
+      title: '',
+      error: 'Nessun risultato trovato'
+    };
+  } catch (error) {
+    return {
+      url: '',
+      title: '',
+      error: `Errore SerpAPI: ${error.message}`
+    };
+  }
 }
 
 async function searchBrave(query, originalQuery, env) {
@@ -123,124 +200,5 @@ async function searchBrave(query, originalQuery, env) {
     return { url: '', title: '', error: 'Nessun risultato trovato su Brave' };
   } catch (error) {
     return { url: '', title: '', error: `Errore Brave: ${error.message}` };
-  }
-}
-
-async function searchDuckDuckGo(query, originalQuery) {
-  try {
-    const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-    
-    const response = await fetch(searchUrl, {
-      method: 'POST',
-      headers: {
-        'User-Agent': getRandomUserAgent(),
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Referer': 'https://duckduckgo.com/',
-      },
-      body: `q=${encodeURIComponent(query)}&b=&kl=wt-wt`
-    });
-    
-    if (!response.ok) {
-      return { url: '', title: '', error: `Errore DuckDuckGo HTTP ${response.status}` };
-    }
-    
-    const html = await response.text();
-    const results = [];
-    
-    const resultPattern = /<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>([^<]+)<\/a>/gi;
-    let match;
-    
-    while ((match = resultPattern.exec(html)) !== null) {
-      let url = match[1];
-      const title = match[2].replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim();
-      
-      if (url.startsWith('//duckduckgo.com/l/?')) {
-        const urlMatch = url.match(/uddg=([^&]+)/);
-        if (urlMatch) url = decodeURIComponent(urlMatch[1]);
-      }
-      
-      if (url.startsWith('http') && !url.includes('duckduckgo.com')) {
-        const similarity = calculateSimilarity(title, originalQuery);
-        results.push({ url, title, similarity });
-      }
-    }
-    
-    if (results.length > 0) {
-      results.sort((a, b) => b.similarity - a.similarity);
-      return { url: results[0].url, title: results[0].title, error: null };
-    }
-    
-    return { url: '', title: '', error: 'Nessun risultato trovato su DuckDuckGo' };
-  } catch (error) {
-    return { url: '', title: '', error: `Errore DuckDuckGo: ${error.message}` };
-  }
-}
-
-async function searchGoogle(query, originalQuery) {
-  try {
-    const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}&num=10&hl=it`;
-    
-    const response = await fetch(searchUrl, {
-      headers: {
-        'User-Agent': getRandomUserAgent(),
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'DNT': '1',
-        'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'none',
-        'Sec-Fetch-User': '?1',
-        'Cache-Control': 'max-age=0',
-      },
-    });
-    
-    if (!response.ok) {
-      return { url: '', title: '', captcha: response.status === 429, error: `Errore HTTP ${response.status}` };
-    }
-    
-    const html = await response.text();
-    
-    // Check for captcha
-    if (/captcha|CAPTCHA|unusual traffic|verify you're not a robot/i.test(html)) {
-      return { captcha: true, error: 'Captcha rilevato su Google', url: '', title: '' };
-    }
-    
-    const results = [];
-    
-    // Extract results
-    const linkRegex = /<a[^>]+href="\/url\?q=([^"&]+)[^"]*"/gi;
-    let match;
-    
-    while ((match = linkRegex.exec(html)) !== null && results.length < 10) {
-      const url = decodeURIComponent(match[1]);
-      
-      if (url && !url.includes('google.com') && !url.includes('webcache.googleusercontent.com')) {
-        const contextStart = Math.max(0, match.index - 200);
-        const contextEnd = Math.min(html.length, match.index + 500);
-        const context = html.substring(contextStart, contextEnd);
-        const titleMatch = context.match(/<h3[^>]*>([^<]+)<\/h3>/i);
-        const title = titleMatch ? titleMatch[1].replace(/<[^>]+>/g, '').trim() : '';
-        
-        const similarity = title ? calculateSimilarity(title, originalQuery) : 0;
-        
-        if (!results.some(r => r.url === url)) {
-          results.push({ url, title: title || url, similarity });
-        }
-      }
-    }
-    
-    if (results.length > 0) {
-      results.sort((a, b) => b.similarity - a.similarity);
-      return { url: results[0].url, title: results[0].title, captcha: false, error: null };
-    }
-    
-    return { url: '', title: '', captcha: false, error: 'Nessun risultato trovato su Google' };
-  } catch (error) {
-    return { url: '', title: '', captcha: false, error: `Errore Google: ${error.message}` };
   }
 }
